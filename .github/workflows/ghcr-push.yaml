@@ -1,0 +1,67 @@
+name: Push to GHCR
+
+on:
+  push:
+    branches: ["main", "fix/**", "fork-ci"]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *" # daily midnight UTC
+
+env:
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+  REGISTRY_USER: ${{ github.actor }}
+  REGISTRY_PASSWORD: ${{ github.token }}
+
+jobs:
+  push-ghcr:
+    name: Build and push multi-platform image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Refresh models catalog
+        run: bash .github/scripts/refresh-model-catalogs.sh
+        continue-on-error: true
+
+      - name: Prepare image metadata
+        id: meta
+        run: |
+          # Docker references require lowercase repository names.
+          name=$(echo '${{ github.event.repository.name }}' | tr '[:upper:]' '[:lower:]')
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          # Docker tags forbid '/'; sanitize branch refs (e.g. fix/foo -> fix-foo).
+          ref_tag=$(echo '${{ github.ref_name }}' | tr '/' '-')
+          echo "tags=latest $ref_tag ${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install qemu dependency
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build Image
+        id: build_image_multiplatform
+        uses: redhat-actions/buildah-build@v2
+        with:
+          image: ${{ steps.meta.outputs.name }}
+          tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/amd64, linux/arm64
+          containerfiles: |
+            ./Dockerfile
+
+      - name: Push To GHCR
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: ${{ steps.build_image_multiplatform.outputs.image }}
+          tags: ${{ steps.build_image_multiplatform.outputs.tags }}
+          registry: ${{ env.IMAGE_REGISTRY }}
+          username: ${{ env.REGISTRY_USER }}
+          password: ${{ env.REGISTRY_PASSWORD }}
+
+      - name: Echo image details
+        run: |
+          echo "Image: ${{ steps.build_image_multiplatform.outputs.image }}"
+          echo "Tags: ${{ steps.build_image_multiplatform.outputs.tags }}"
